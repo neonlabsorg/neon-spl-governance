@@ -546,7 +546,7 @@ pub fn split_with_realm(
         AccountMeta::new(new_vesting_account, false),
         AccountMeta::new(*new_vesting_token_account, false),
         AccountMeta::new_readonly(*new_vesting_owner, false),
-        AccountMeta::new_readonly(*payer, true),
+        AccountMeta::new(*payer, true),
 
         AccountMeta::new_readonly(*governance_id, false),
         AccountMeta::new_readonly(*realm, false),
