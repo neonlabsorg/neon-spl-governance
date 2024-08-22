@@ -21,11 +21,11 @@ else
 fi
 
 docker login -u=$user -p=$password
-docker push neonlabsorg/launch-script:$tag
+docker push neonlabsorg/neon-governance:$tag
 
 if [[ $TAG == "stable" ]] || [[ $TAG == ci-* ]] || [[ $TAG == v*.*.* ]]; then
-    docker tag neonlabsorg/launch-script:$tag neonlabsorg/launch-script:${TAG}
-    docker push neonlabsorg/launch-script:${TAG}
+    docker tag neonlabsorg/neon-governance:$tag neonlabsorg/neon-governance:${TAG}
+    docker push neonlabsorg/neon-governance:${TAG}
 fi
 
 exit 0
