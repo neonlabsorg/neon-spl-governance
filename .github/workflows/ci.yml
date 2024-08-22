@@ -24,6 +24,13 @@ jobs:
         git submodule sync
         git submodule update --init --recursive
 
+    - name: "Prepare to build image"
+      id: prep
+      run: |
+        docker pull solanalabs/solana:${SOLANA_REVISION}
+        IMAGE="neonlabsorg/neon-governance"
+        echo ::set-output name=tagged_image::${IMAGE}:${GITHUB_SHA}
+
     - name: "Set up Docker Buildx"
       id: buildx
       uses: docker/setup-buildx-action@v2
