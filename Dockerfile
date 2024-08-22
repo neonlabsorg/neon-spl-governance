@@ -1,7 +1,7 @@
 # Install BPF SDK
 FROM solanalabs/rust:1.62.0 AS builder
 # Use hardcoded solana revision for install SDK to prevent long rebuild when use other SOLANA_REVISION
-RUN sh -c "$(curl -sSfL https://release.solana.com/v1.10.29/install)" && \
+RUN sh -c "$(curl -sSfL https://release.solana.com/v1.14.24/install)" && \
     /root/.local/share/solana/install/active_release/bin/sdk/bpf/scripts/install.sh
 ENV PATH=/root/.local/share/solana/install/active_release/bin:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
