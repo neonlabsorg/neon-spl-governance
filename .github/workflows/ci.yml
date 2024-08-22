@@ -1,0 +1,68 @@
+name: ci
+
+on: [push]
+
+env:
+  SOLANA_REVISION: v1.10.29
+  GITHUB_SHA: ${{ github.sha }}
+  BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+  DOCKER_HUB_PASSWORD: ${{ secrets.DHUBP }}
+  DOCKER_HUB_USER: ${{ secrets.DHUBU }}
+
+jobs:
+  neon-governance-deploy:
+    runs-on: build-runner
+    env:
+      NEON_GOVERNANCE_IMAGE: neonlabsorg/neon-governance:${GITHUB_SHA}
+    steps:
+    - uses: actions/checkout@v2
+    - name: "Checkout submodules using a Personal Access Token"
+      run: |
+        git config --file .gitmodules --get-regexp url | while read url; do
+        git config --file=.gitmodules $(echo "$url" | sed -E "s/git@github.com:|https:\/\/github.com\//https:\/\/${{ secrets.CI_PAT }}:${{ secrets.CI_PAT }}@github.com\//")
+        done
+        git submodule sync
+        git submodule update --init --recursive
+
+    - name: "Prepare to build image"
+      id: prep
+      run: |
+        docker pull solanalabs/solana:${SOLANA_REVISION}
+        IMAGE="neonlabsorg/neon-governance"
+        echo ::set-output name=tagged_image::${IMAGE}:${GITHUB_SHA}
+
+    - name: "Set up Docker Buildx"
+      id: buildx
+      uses: docker/setup-buildx-action@v2
+      with:
+        version: v0.9.1
+        install: true
+
+    - name: "Cache Docker layers"
+      uses: actions/cache@v3
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-multi-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-multi-buildx
+
+    - name: "Build image"
+      uses: docker/build-push-action@v3
+      with:
+        context: .
+        builder: ${{ steps.buildx.outputs.name }}
+        file: Dockerfile
+        target: base
+        push: false
+        load: true
+        tags: ${{ steps.prep.outputs.tagged_image }}
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,mode=max,dest=/tmp/.buildx-cache-new
+
+    - name: "Move cache"
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+    - name: "Publish the Docker image"
+      run: ./.github/steps/publish-image.sh -u ${DOCKER_HUB_USER} -p ${DOCKER_HUB_PASSWORD} -b ${BRANCH_NAME} -t ${GITHUB_SHA}
