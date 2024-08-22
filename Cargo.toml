@@ -3,8 +3,8 @@ overflow-checks = true
 
 [workspace]
 members = [
-    "addin-fixed-weights/program",
-    "addin-fixed-weights/mainnet",
+    # "addin-fixed-weights/program",
+    # "addin-fixed-weights/mainnet",
     "addin-vesting/program",
     "addin-vesting/cli",
     "maintenance/program",

@@ -6,8 +6,9 @@ use clap::{
 };
 use const_format::concatcp;
 use solana_clap_utils::{
+    keypair::signer_from_path,
     input_parsers::{keypair_of, pubkey_of, value_of, values_of},
-    input_validators::{is_amount, is_keypair, is_pubkey, is_slot, is_url},
+    input_validators::{is_amount, is_keypair, is_pubkey, is_slot, is_url, is_valid_signer},
 };
 use solana_client::{
     rpc_client::RpcClient,
@@ -25,8 +26,8 @@ use solana_sdk::{
     instruction::Instruction,
     transaction::Transaction,
 };
-use spl_associated_token_account::{get_associated_token_address};
-use std::convert::TryInto;
+use spl_associated_token_account::get_associated_token_address;
+use std::{convert::TryInto, process::exit, sync::Arc};
 use spl_governance_addin_vesting::{
     state::{ VestingRecord, VestingSchedule },
     instruction::{
@@ -35,14 +36,28 @@ use spl_governance_addin_vesting::{
     },
     voter_weight::get_voter_weight_record_address,
 };
+use solana_remote_wallet::remote_wallet::RemoteWalletManager;
+
+fn get_signer(
+    matches: &ArgMatches<'_>,
+    keypair_name: &str,
+    wallet_manager: &mut Option<Arc<RemoteWalletManager>>,
+) -> Option<Box<dyn Signer>> {
+    matches.value_of(keypair_name).map(|path| {
+        signer_from_path(matches, path, keypair_name, wallet_manager).unwrap_or_else(|e| {
+            eprintln!("error: {}", e);
+            exit(1);
+        })
+    })
+}
 
 // Lock the vesting contract
 #[allow(clippy::too_many_arguments)]
 fn command_deposit_svc(
     rpc_client: RpcClient,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    source_token_owner: Keypair,
+    payer: &dyn Signer,
+    source_token_owner: &dyn Signer,
     possible_source_token_pubkey: Option<Pubkey>,
     vesting_owner_pubkey: Pubkey,
     mint_pubkey: Pubkey,
@@ -90,7 +105,7 @@ fn command_deposit_svc(
     let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[&payer, &vesting_token_keypair, &source_token_owner], latest_blockhash);
+    transaction.sign(&[payer, &vesting_token_keypair, source_token_owner], latest_blockhash);
 
     msg!("Vesting addin program id: {:?}", vesting_addin_program_id,);
     msg!("SPL Token program id: {:?}", spl_token::id(),);
@@ -119,8 +134,8 @@ fn command_deposit_with_realm_svc(
     rpc_client: RpcClient,
     governance_program_id: Pubkey,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    source_token_owner: Keypair,
+    payer: &dyn Signer,
+    source_token_owner: &dyn Signer,
     possible_source_token_pubkey: Option<Pubkey>,
     vesting_owner_pubkey: Pubkey,
     mint_pubkey: Pubkey,
@@ -171,7 +186,7 @@ fn command_deposit_with_realm_svc(
     let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[&payer, &vesting_token_keypair, &source_token_owner], latest_blockhash);
+    transaction.sign(&[payer, &vesting_token_keypair, source_token_owner], latest_blockhash);
 
     msg!("Vesting addin program id: {:?}", vesting_addin_program_id,);
     msg!("SPL Token program id: {:?}", spl_token::id(),);
@@ -199,8 +214,8 @@ fn command_deposit_with_realm_svc(
 fn command_withdraw_svc(
     rpc_client: RpcClient,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    vesting_owner: Keypair,
+    payer: &dyn Signer,
+    vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     destination_token_pubkey: Pubkey,
 ) {
@@ -217,7 +232,7 @@ fn command_withdraw_svc(
     let mut transaction = Transaction::new_with_payer(&[withdraw_instruction], Some(&payer.pubkey()));
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[&payer, &vesting_owner], latest_blockhash);
+    transaction.sign(&[payer, vesting_owner], latest_blockhash);
 
     rpc_client.send_transaction(&transaction).unwrap();
 }
@@ -227,8 +242,8 @@ fn command_withdraw_with_realm_svc(
     rpc_client: RpcClient,
     governance_program_id: Pubkey,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    vesting_owner: Keypair,
+    payer: &dyn Signer,
+    vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
@@ -250,7 +265,7 @@ fn command_withdraw_with_realm_svc(
     let mut transaction = Transaction::new_with_payer(&[withdraw_instruction], Some(&payer.pubkey()));
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[&payer, &vesting_owner], latest_blockhash);
+    transaction.sign(&[payer, vesting_owner], latest_blockhash);
 
     rpc_client.send_transaction(&transaction).unwrap();
 }
@@ -258,8 +273,8 @@ fn command_withdraw_with_realm_svc(
 fn command_change_owner(
     rpc_client: RpcClient,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    vesting_owner: Keypair,
+    payer: &dyn Signer,
+    vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     new_vesting_owner_pubkey: Pubkey,
 ) {
@@ -276,7 +291,7 @@ fn command_change_owner(
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
     transaction.sign(
-        &[&payer, &vesting_owner],
+        &[payer, vesting_owner],
         latest_blockhash,
     );
 
@@ -288,8 +303,8 @@ fn command_change_owner_with_realm(
     rpc_client: RpcClient,
     governance_program_id: Pubkey,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    vesting_owner: Keypair,
+    payer: &dyn Signer,
+    vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
@@ -330,7 +345,7 @@ fn command_change_owner_with_realm(
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
     transaction.sign(
-        &[&payer, &vesting_owner],
+        &[payer, vesting_owner],
         latest_blockhash,
     );
 
@@ -340,7 +355,7 @@ fn command_change_owner_with_realm(
 fn command_create_voter_weight_record(
     rpc_client: RpcClient,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
+    payer: &dyn Signer,
     record_owner_pubkey: Pubkey,
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
@@ -359,7 +374,7 @@ fn command_create_voter_weight_record(
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
     transaction.sign(
-        &[&payer],
+        &[payer],
         latest_blockhash,
     );
 
@@ -371,8 +386,8 @@ fn command_set_vote_percentage_with_realm(
     rpc_client: RpcClient,
     governance_program_id: Pubkey,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    vesting_authority: Keypair,
+    payer: &dyn Signer,
+    vesting_authority: &dyn Signer,
     vesting_owner_pubkey: Pubkey,
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
@@ -394,7 +409,7 @@ fn command_set_vote_percentage_with_realm(
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
     transaction.sign(
-        &[&payer,&vesting_authority],
+        &[payer, vesting_authority],
         latest_blockhash,
     );
 
@@ -406,8 +421,8 @@ fn command_split(
     rpc_client: RpcClient,
     governance_program_id: Pubkey,
     vesting_addin_program_id: Pubkey,
-    payer: Keypair,
-    vesting_owner: Keypair,
+    payer: &dyn Signer,
+    vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     new_vesting_owner_pubkey: Pubkey,
     schedules: Vec<VestingSchedule>,
@@ -435,7 +450,7 @@ fn command_split(
 
     let instructions = [
         system_instruction::create_account(
-            &vesting_owner.pubkey(),
+            &payer.pubkey(),
             &new_vesting_token_pubkey,
             Rent::default().minimum_balance(spl_token::state::Account::LEN),
             spl_token::state::Account::LEN as u64,
@@ -481,7 +496,7 @@ fn command_split(
 
     let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
     transaction.sign(
-        &[&payer, &vesting_owner, &new_vesting_token_keypair],
+        &[payer, vesting_owner, &new_vesting_token_keypair],
         latest_blockhash,
     );
 
@@ -680,7 +695,7 @@ trait ArgsHelper {
     fn arg_optional_payer(self) -> Self;
     fn arg_payer(self) -> Self;
     fn arg_vesting_address(self) -> Self;
-    fn arg_vesting_owner_keypair(self) -> Self;
+    fn arg_vesting_owner_signer(self) -> Self;
     fn arg_vesting_owner_address(self, required: bool) -> Self;
     fn arg_new_vesting_owner(self) -> Self;
     fn arg_realm_address(self, required: bool) -> Self;
@@ -713,13 +728,13 @@ impl ArgsHelper for App<'_, '_> {
         )
     }
 
-    fn arg_vesting_owner_keypair(self) -> Self {
+    fn arg_vesting_owner_signer(self) -> Self {
         self.arg(
             Arg::with_name("vesting_owner")
                 .long("vesting_owner")
                 .value_name("KEYPAIR")
                 .required(true)
-                .validator(is_keypair)
+                .validator(is_valid_signer)
                 .takes_value(true)
                 .help(
                     "Specify the vesting owner account address. \
@@ -909,7 +924,7 @@ fn main() {
                         .long("source_owner")
                         .value_name("KEYPAIR")
                         .required(true)
-                        .validator(is_keypair)
+                        .validator(is_valid_signer)
                         .takes_value(true)
                         .help(
                             "Specify the source account owner. \
@@ -945,7 +960,7 @@ fn main() {
                 .about("Unlock & Withdraw a vesting contract. This will only release \
                         the schedules that have reached maturity.")
                 .arg_optional_payer()
-                .arg_vesting_owner_keypair()
+                .arg_vesting_owner_signer()
                 .arg_vesting_address()
                 .arg(
                     Arg::with_name("destination_address")
@@ -961,7 +976,7 @@ fn main() {
             SubCommand::with_name("change-owner")
                 .about("Change the owner of a vesting contract")
                 .arg_optional_payer()
-                .arg_vesting_owner_keypair()
+                .arg_vesting_owner_signer()
                 .arg_vesting_address()
                 .arg_new_vesting_owner()
         )
@@ -990,7 +1005,7 @@ fn main() {
                         .long("vesting_authority")
                         .value_name("KEYPAIR")
                         .required(true)
-                        .validator(is_keypair)
+                        .validator(is_valid_signer)
                         .takes_value(true)
                         .help(
                             "Specify the vesting authority account address. \
@@ -1015,7 +1030,7 @@ fn main() {
             SubCommand::with_name("split")
                 .about("Move remaining vesting to another account using a new release schedule")
                 .arg_optional_payer()
-                .arg_vesting_owner_keypair()
+                .arg_vesting_owner_signer()
                 .arg_vesting_address()
                 .arg_new_vesting_owner()
                 .arg_schedules()
@@ -1051,7 +1066,12 @@ fn main() {
             let mint_pubkey = pubkey_of(arg_matches, "mint_address").unwrap();
             let realm_opt: Option<Pubkey> = pubkey_of(arg_matches, "realm_address");
 
-            let payer_keypair = keypair_of(arg_matches, "payer").unwrap_or_else(|| keypair_of(arg_matches, "source_owner").unwrap() );
+            let payer_keypair = keypair_of(arg_matches, "payer");
+            let payer = payer_keypair
+                .as_ref()
+                .map(|v| v as &dyn Signer)
+                .unwrap_or(&source_keypair);
+
             let confirm: bool = value_of(arg_matches, "confirm").unwrap();
             let schedules = parse_schedules(arg_matches);
 
@@ -1060,8 +1080,8 @@ fn main() {
                     rpc_client,
                     governance_program_id,
                     vesting_addin_program_id,
-                    payer_keypair,
-                    source_keypair,
+                    payer,
+                    &source_keypair,
                     source_token_pubkey,
                     vesting_owner_pubkey,
                     mint_pubkey,
@@ -1073,8 +1093,8 @@ fn main() {
                 command_deposit_svc(
                     rpc_client,
                     vesting_addin_program_id,
-                    payer_keypair,
-                    source_keypair,
+                    payer,
+                    &source_keypair,
                     source_token_pubkey,
                     vesting_owner_pubkey,
                     mint_pubkey,
@@ -1085,12 +1105,18 @@ fn main() {
         }
         ("withdraw", Some(arg_matches)) => {
 
-            let vesting_owner_keypair = keypair_of(arg_matches, "vesting_owner").unwrap();
+            // let vesting_owner_keypair = keypair_of(arg_matches, "vesting_owner").unwrap();
+            let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
+            let vesting_owner_signer = get_signer(arg_matches, "vesting_owner", &mut wallet_manager).expect("Need to specify `vesting_owner`");
             let vesting_token_pubkey = pubkey_of(arg_matches, "vesting_address").unwrap();
 
             let destination_token_pubkey = pubkey_of(arg_matches, "destination_address").unwrap();
 
-            let payer_keypair = keypair_of(arg_matches, "payer").unwrap_or_else(|| keypair_of(arg_matches, "vesting_owner").unwrap() );
+            let payer_keypair = keypair_of(arg_matches, "payer");
+            let payer = payer_keypair
+                .as_ref()
+                .map(|v| v as &dyn Signer)
+                .unwrap_or(&*vesting_owner_signer);
 
             let (vesting_pubkey,_) = Pubkey::find_program_address(&[vesting_token_pubkey.as_ref()], &vesting_addin_program_id);
 
@@ -1104,8 +1130,8 @@ fn main() {
                     rpc_client,
                     governance_program_id,
                     vesting_addin_program_id,
-                    payer_keypair,
-                    vesting_owner_keypair,
+                    payer,
+                    &*vesting_owner_signer,
                     vesting_token_pubkey,
                     mint_pubkey,
                     realm_pubkey,
@@ -1115,8 +1141,8 @@ fn main() {
                 command_withdraw_svc(
                     rpc_client,
                     vesting_addin_program_id,
-                    payer_keypair,
-                    vesting_owner_keypair,
+                    payer,
+                    &*vesting_owner_signer,
                     vesting_token_pubkey,
                     destination_token_pubkey,
                 )
@@ -1124,12 +1150,18 @@ fn main() {
         }
         ("change-owner", Some(arg_matches)) => {
 
-            let vesting_owner_keypair = keypair_of(arg_matches, "vesting_owner").unwrap();
+            let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
+            let vesting_owner_signer = get_signer(arg_matches, "vesting_owner", &mut wallet_manager)
+                .expect("Need to specify `vesting_owner`");
             let vesting_token_pubkey = pubkey_of(arg_matches, "vesting_address").unwrap();
 
             let new_vesting_owner_pubkey = pubkey_of(arg_matches, "new_vesting_owner").unwrap();
             
-            let payer_keypair = keypair_of(arg_matches, "payer").unwrap_or_else(|| keypair_of(arg_matches, "vesting_owner").unwrap() );
+            let payer_keypair = keypair_of(arg_matches, "payer");
+            let payer = payer_keypair
+                .as_ref()
+                .map(|v| v as &dyn Signer)
+                .unwrap_or(&*vesting_owner_signer);
 
             let (vesting_pubkey,_) = Pubkey::find_program_address(&[vesting_token_pubkey.as_ref()], &vesting_addin_program_id);
 
@@ -1143,8 +1175,8 @@ fn main() {
                     rpc_client,
                     governance_program_id,
                     vesting_addin_program_id,
-                    payer_keypair,
-                    vesting_owner_keypair,
+                    payer,
+                    &*vesting_owner_signer,
                     vesting_token_pubkey,
                     mint_pubkey,
                     realm_pubkey,
@@ -1154,8 +1186,8 @@ fn main() {
                 command_change_owner(
                     rpc_client,
                     vesting_addin_program_id,
-                    payer_keypair,
-                    vesting_owner_keypair,
+                    payer,
+                    &*vesting_owner_signer,
                     vesting_token_pubkey,
                     new_vesting_owner_pubkey,
                 )
@@ -1173,15 +1205,16 @@ fn main() {
             command_create_voter_weight_record(
                 rpc_client,
                 vesting_addin_program_id,
-                payer_keypair,
+                &payer_keypair,
                 record_owner_pubkey,
                 mint_pubkey,
                 realm_pubkey,
             )
         }
         ("set-vote-percentage", Some(arg_matches)) => {
-
-            let vesting_authority = keypair_of(arg_matches, "vesting_authority").unwrap();
+            let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
+            let vesting_authority = get_signer(arg_matches, "vesting_authority", &mut wallet_manager)
+                .expect("Need to specify `vesting_authority`");
             let mint_pubkey = pubkey_of(arg_matches, "mint_address").unwrap();
             let realm_pubkey = pubkey_of(arg_matches, "realm_address").unwrap();
 
@@ -1189,14 +1222,18 @@ fn main() {
             
             let percentage: u16 = value_of(arg_matches, "percentage").unwrap();
 
-            let payer_keypair = keypair_of(arg_matches, "payer").unwrap_or_else(|| keypair_of(arg_matches, "vesting_authority").unwrap() );
+            let payer_keypair = keypair_of(arg_matches, "payer");
+            let payer = payer_keypair
+                .as_ref()
+                .map(|v| v as &dyn Signer)
+                .unwrap_or(&*vesting_authority);
 
             command_set_vote_percentage_with_realm(
                 rpc_client,
                 governance_program_id,
                 vesting_addin_program_id,
-                payer_keypair,
-                vesting_authority,
+                payer,
+                &*vesting_authority,
                 vesting_owner_pubkey,
                 mint_pubkey,
                 realm_pubkey,
@@ -1204,8 +1241,16 @@ fn main() {
             )
         }
         ("split", Some(arg_matches)) => {
-            let payer_keypair = keypair_of(arg_matches, "payer").unwrap_or_else(|| keypair_of(arg_matches, "vesting_owner").unwrap() );
-            let vesting_owner_keypair = keypair_of(arg_matches, "vesting_owner").unwrap();
+            let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
+            let vesting_owner_signer = get_signer(arg_matches, "vesting_owner", &mut wallet_manager)
+                .expect("Need to specify `vesting_owner`");
+
+            let payer_keypair = keypair_of(arg_matches, "payer");
+            let payer = payer_keypair
+                .as_ref()
+                .map(|v| v as &dyn Signer)
+                .unwrap_or(&*vesting_owner_signer);
+
             let vesting_token_pubkey = pubkey_of(arg_matches, "vesting_address").unwrap();
             let new_vesting_owner_pubkey = pubkey_of(arg_matches, "new_vesting_owner").unwrap();
             let schedules = parse_schedules(arg_matches);
@@ -1214,8 +1259,8 @@ fn main() {
                 rpc_client,
                 governance_program_id,
                 vesting_addin_program_id,
-                payer_keypair,
-                vesting_owner_keypair,
+                payer,
+                &*vesting_owner_signer,
                 vesting_token_pubkey,
                 new_vesting_owner_pubkey,
                 schedules,

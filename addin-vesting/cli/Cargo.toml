@@ -14,6 +14,7 @@ solana-clap-utils = "1.10.16"
 solana-client = "1.10.16"
 solana-program = "1.10.16"
 solana-sdk = "1.10.16"
+solana-remote-wallet = { version = "1.10.16", features = ["default"] }
 spl-associated-token-account = {version = "1.0.2", features = ["no-entrypoint"]}
 spl-governance-addin-vesting = { version = "0.2", path = "../program" }
 spl-token = {version = "3.2.0", features = ["no-entrypoint"]}
