@@ -488,6 +488,64 @@ fn command_split(
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
+fn command_list(
+    rpc_client: RpcClient,
+    vesting_addin_program_id: Pubkey,
+) {
+    msg!("\n----------------- LOCKED TOKENS LIST ------------------\n");
+    let records: Vec<(Pubkey,Account)> =
+    rpc_client.get_program_accounts_with_config(
+        &vesting_addin_program_id,
+        RpcProgramAccountsConfig {
+            filters: Some(vec![
+                rpc_filter::RpcFilterType::Memcmp(
+                    #[allow(deprecated)]
+                    rpc_filter::Memcmp {
+                        offset: 0,
+                        bytes: rpc_filter::MemcmpEncodedBytes::Bytes(vec![1]),
+                        encoding: None,
+                    },
+                )
+            ]),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
+                data_slice: None,
+                commitment: None,
+                min_context_slot: None,
+            },
+            with_context: Some(false),
+        }
+    ).unwrap();
+
+    struct Info {
+        token: Pubkey,
+        owner: Pubkey,
+        amount: u64,
+    }
+    let mut accounts = records
+        .into_iter()
+        .map(|(_, account)| {
+            let vesting_record: VestingRecord = try_from_slice_unchecked(&account.data).unwrap();
+            let amount = vesting_record.schedule.iter().map(|v| v.amount).sum::<u64>();
+            Info {token: vesting_record.token, owner: vesting_record.owner, amount}
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by(|l, r| l.amount.cmp(&r.amount).reverse());
+
+    let total_amount = accounts.iter().map(|v| v.amount).sum::<u64>();
+    msg!("Total amount: {}.{:09}", total_amount/1_000_000_000, total_amount%1_000_000_000);
+    
+    msg!("Vesting                                         Owner                                                      Amount");
+    for account in accounts {
+        msg!("{}\t{}\t{:12}.{:09}", 
+            account.token, 
+            account.owner, 
+            account.amount/1_000_000_000, 
+            account.amount%1_000_000_000,
+        );
+    }
+}
+
 fn command_info(
     rpc_client: RpcClient,
     vesting_addin_program_id: Pubkey,
@@ -972,6 +1030,10 @@ fn main() {
                 .about("Print information about vesting contracts of a vesting owner")
                 .arg_vesting_owner_address(true)
         )
+        .subcommand(
+            SubCommand::with_name("list")
+                .about("Print the list of locked tokens")
+        )
         .get_matches();
 
     let rpc_url = value_t!(matches, "rpc_url", String).unwrap();
@@ -1199,6 +1261,9 @@ fn main() {
                 msg!("\nVesting Account Pubkey: {:?}", &vesting_account_pubkey);
                 report_vesting_record_info(&vesting_record);
             }
+        }
+        ("list", Some(_)) => {
+            command_list(rpc_client, vesting_addin_program_id)
         }
         _ => unreachable!(),
     };
