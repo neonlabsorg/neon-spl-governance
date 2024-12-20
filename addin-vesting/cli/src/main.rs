@@ -6,7 +6,7 @@ use clap::{
 };
 use const_format::concatcp;
 use solana_clap_utils::{
-    keypair::signer_from_path,
+    keypair::{DefaultSigner, signer_from_path},
     input_parsers::{keypair_of, pubkey_of, value_of, values_of},
     input_validators::{is_amount, is_keypair, is_pubkey, is_slot, is_url, is_valid_signer},
 };
@@ -873,6 +873,16 @@ impl ArgsHelper for App<'_, '_> {
     }
 }
 
+pub fn read_payer(payer_str: &str) -> Box<dyn Signer> {
+    let default_signer = DefaultSigner::new("payer", payer_str);
+    let mut wallet_manager = None;
+    let matches = ArgMatches::default();
+    default_signer.signer_from_path(
+        &matches,
+        &mut wallet_manager,
+    ).expect("Can't read payer")
+}
+
 fn main() {
     let matches = App::new(crate_name!())
         .about(crate_description!())
@@ -1059,7 +1069,9 @@ fn main() {
 
     match matches.subcommand() {
         ("deposit", Some(arg_matches)) => {
-            let source_keypair = keypair_of(arg_matches, "source_owner").unwrap();
+            let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
+            let source_signer = get_signer(arg_matches, "source_owner", &mut wallet_manager)
+                .expect("Need to specify `source_owner`");
             let source_token_pubkey = pubkey_of(arg_matches, "source_token_address");
             let vesting_owner_pubkey = pubkey_of(arg_matches, "vesting_owner").unwrap();
 
@@ -1070,7 +1082,7 @@ fn main() {
             let payer = payer_keypair
                 .as_ref()
                 .map(|v| v as &dyn Signer)
-                .unwrap_or(&source_keypair);
+                .unwrap_or(&*source_signer);
 
             let confirm: bool = value_of(arg_matches, "confirm").unwrap();
             let schedules = parse_schedules(arg_matches);
@@ -1081,7 +1093,7 @@ fn main() {
                     governance_program_id,
                     vesting_addin_program_id,
                     payer,
-                    &source_keypair,
+                    &*source_signer,
                     source_token_pubkey,
                     vesting_owner_pubkey,
                     mint_pubkey,
@@ -1094,7 +1106,7 @@ fn main() {
                     rpc_client,
                     vesting_addin_program_id,
                     payer,
-                    &source_keypair,
+                    &*source_signer,
                     source_token_pubkey,
                     vesting_owner_pubkey,
                     mint_pubkey,
@@ -1104,8 +1116,6 @@ fn main() {
             }
         }
         ("withdraw", Some(arg_matches)) => {
-
-            // let vesting_owner_keypair = keypair_of(arg_matches, "vesting_owner").unwrap();
             let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
             let vesting_owner_signer = get_signer(arg_matches, "vesting_owner", &mut wallet_manager).expect("Need to specify `vesting_owner`");
             let vesting_token_pubkey = pubkey_of(arg_matches, "vesting_address").unwrap();
@@ -1149,7 +1159,6 @@ fn main() {
             };
         }
         ("change-owner", Some(arg_matches)) => {
-
             let mut wallet_manager: Option<Arc<RemoteWalletManager>> = None;
             let vesting_owner_signer = get_signer(arg_matches, "vesting_owner", &mut wallet_manager)
                 .expect("Need to specify `vesting_owner`");
@@ -1194,7 +1203,6 @@ fn main() {
             }
         }
         ("create-voter-weight-record", Some(arg_matches)) => {
-
             let record_owner_pubkey = pubkey_of(arg_matches, "record_owner").unwrap();
             
             let mint_pubkey = pubkey_of(arg_matches, "mint_address").unwrap();
