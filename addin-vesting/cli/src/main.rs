@@ -6,9 +6,9 @@ use clap::{
 };
 use const_format::concatcp;
 use solana_clap_utils::{
-    keypair::{DefaultSigner, signer_from_path},
     input_parsers::{keypair_of, pubkey_of, value_of, values_of},
     input_validators::{is_amount, is_keypair, is_pubkey, is_slot, is_url, is_valid_signer},
+    keypair::signer_from_path
 };
 use solana_client::{
     rpc_client::RpcClient,
@@ -20,10 +20,15 @@ use solana_program::{
     msg, program_pack::Pack, pubkey::Pubkey, rent::Rent,
 };
 use solana_sdk::{
-    self, commitment_config::CommitmentConfig, signature::Keypair, signature::Signer,
+    self,
     account::Account,
-    system_instruction,
+    commitment_config::CommitmentConfig,
+    compute_budget::ComputeBudgetInstruction,
     instruction::Instruction,
+    message::Message,
+    signature::{Keypair, Signer},
+    signers::Signers,
+    system_instruction,
     transaction::Transaction,
 };
 use spl_associated_token_account::get_associated_token_address;
@@ -51,6 +56,43 @@ fn get_signer(
     })
 }
 
+fn create_transaction<T: Signers>(
+    rpc_client: &RpcClient,
+    instructions: &[Instruction],
+    payer: &dyn Signer,
+    signing_keypairs: &T,
+    compute_unit_price: Option<u64>,
+) -> Result<Transaction, Box<dyn std::error::Error>> {
+    let blockhash = rpc_client.get_latest_blockhash().expect("Can't get recent blockhash");
+    let mut instrs = if let Some(compute_unit_price) = compute_unit_price {
+        let result = rpc_client.simulate_transaction(
+            &Transaction::new_unsigned(
+                Message::new_with_blockhash(
+                    &instructions,
+                    Some(&payer.pubkey()),
+                    &blockhash
+                )
+            )
+        ).expect("Can't simulate transaction to get consumed compute units");
+        let units_consumed = result.value.units_consumed.expect("Can't estimate compute units") + 300;
+        vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(((units_consumed*110)/100) as u32),
+            ComputeBudgetInstruction::set_compute_unit_price(compute_unit_price),
+        ]
+    } else {
+        vec![]
+    };
+    instrs.extend_from_slice(instructions);
+    
+    let mut transaction = Transaction::new_with_payer(&instrs, Some(&payer.pubkey()));
+    if !signing_keypairs.pubkeys().contains(&payer.pubkey()) {
+        transaction.try_partial_sign(&[payer], blockhash)?;
+    }
+    transaction.try_sign(signing_keypairs, blockhash)?;
+
+    Ok(transaction)
+}
+
 // Lock the vesting contract
 #[allow(clippy::too_many_arguments)]
 fn command_deposit_svc(
@@ -62,6 +104,7 @@ fn command_deposit_svc(
     vesting_owner_pubkey: Pubkey,
     mint_pubkey: Pubkey,
     schedules: Vec<VestingSchedule>,
+    compute_unit_price: Option<u64>,
     confirm: bool,
 ) {
     // If no source token account was given, use the associated source account
@@ -102,10 +145,13 @@ fn command_deposit_svc(
         .unwrap(),
     ];
 
-    let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[payer, &vesting_token_keypair, source_token_owner], latest_blockhash);
+    let transaction = create_transaction(
+        &rpc_client,
+        &instructions,
+        payer,
+        &[&vesting_token_keypair, source_token_owner],
+        compute_unit_price,
+    ).unwrap();
 
     msg!("Vesting addin program id: {:?}", vesting_addin_program_id,);
     msg!("SPL Token program id: {:?}", spl_token::id(),);
@@ -141,6 +187,7 @@ fn command_deposit_with_realm_svc(
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
     schedules: Vec<VestingSchedule>,
+    compute_unit_price: Option<u64>,
     confirm: bool,
 ) {
     // If no source token account was given, use the associated source account
@@ -183,10 +230,13 @@ fn command_deposit_with_realm_svc(
         .unwrap(),
     ];
 
-    let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[payer, &vesting_token_keypair, source_token_owner], latest_blockhash);
+    let transaction = create_transaction(
+        &rpc_client,
+        &instructions,
+        payer,
+        &[&vesting_token_keypair, source_token_owner],
+        compute_unit_price,
+    ).unwrap();
 
     msg!("Vesting addin program id: {:?}", vesting_addin_program_id,);
     msg!("SPL Token program id: {:?}", spl_token::id(),);
@@ -218,6 +268,7 @@ fn command_withdraw_svc(
     vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     destination_token_pubkey: Pubkey,
+    compute_unit_price: Option<u64>,
 ) {
 
     let withdraw_instruction = withdraw(
@@ -229,10 +280,13 @@ fn command_withdraw_svc(
     )
     .unwrap();
 
-    let mut transaction = Transaction::new_with_payer(&[withdraw_instruction], Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[payer, vesting_owner], latest_blockhash);
+    let transaction = create_transaction(
+        &rpc_client,
+        &[withdraw_instruction],
+        payer,
+        &[vesting_owner],
+        compute_unit_price,
+    ).unwrap();
 
     rpc_client.send_transaction(&transaction).unwrap();
 }
@@ -248,6 +302,7 @@ fn command_withdraw_with_realm_svc(
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
     destination_token_pubkey: Pubkey,
+    compute_unit_price: Option<u64>,
 ) {
 
     let withdraw_instruction = withdraw_with_realm(
@@ -262,11 +317,13 @@ fn command_withdraw_with_realm_svc(
     )
     .unwrap();
 
-    let mut transaction = Transaction::new_with_payer(&[withdraw_instruction], Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(&[payer, vesting_owner], latest_blockhash);
-
+    let transaction = create_transaction(
+        &rpc_client,
+        &[withdraw_instruction],
+        payer,
+        &[vesting_owner],
+        compute_unit_price,
+    ).unwrap();
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
@@ -277,6 +334,7 @@ fn command_change_owner(
     vesting_owner: &dyn Signer,
     vesting_token_pubkey: Pubkey,
     new_vesting_owner_pubkey: Pubkey,
+    compute_unit_price: Option<u64>,
 ) {
 
     let change_owner_instruction = change_owner(
@@ -287,14 +345,13 @@ fn command_change_owner(
     )
     .unwrap();
 
-    let mut transaction = Transaction::new_with_payer(&[change_owner_instruction], Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(
-        &[payer, vesting_owner],
-        latest_blockhash,
-    );
-
+    let transaction = create_transaction(
+        &rpc_client,
+        &[change_owner_instruction],
+        payer,
+        &[vesting_owner],
+        compute_unit_price,
+    ).unwrap();
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
@@ -309,6 +366,7 @@ fn command_change_owner_with_realm(
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
     new_vesting_owner_pubkey: Pubkey,
+    compute_unit_price: Option<u64>,
 ) {
 
     let mut instructions: Vec<Instruction> = Vec::new();
@@ -341,14 +399,13 @@ fn command_change_owner_with_realm(
     .unwrap();
     instructions.push(change_owner_instruction);
 
-    let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(
-        &[payer, vesting_owner],
-        latest_blockhash,
-    );
-
+    let transaction = create_transaction(
+        &rpc_client,
+        &instructions,
+        payer,
+        &[vesting_owner],
+        compute_unit_price,
+    ).unwrap();
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
@@ -359,6 +416,7 @@ fn command_create_voter_weight_record(
     record_owner_pubkey: Pubkey,
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
+    compute_unit_price: Option<u64>,
 ) {
 
     let instruction = create_voter_weight_record(
@@ -370,14 +428,13 @@ fn command_create_voter_weight_record(
     )
     .unwrap();
 
-    let mut transaction = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(
+    let transaction = create_transaction(
+        &rpc_client,
+        &[instruction],
+        payer,
         &[payer],
-        latest_blockhash,
-    );
-
+        compute_unit_price,
+    ).unwrap();
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
@@ -392,6 +449,7 @@ fn command_set_vote_percentage_with_realm(
     mint_pubkey: Pubkey,
     realm_pubkey: Pubkey,
     percentage: u16,
+    compute_unit_price: Option<u64>,
 ) {
 
     let instruction = set_vote_percentage_with_realm(
@@ -405,14 +463,13 @@ fn command_set_vote_percentage_with_realm(
     )
     .unwrap();
 
-    let mut transaction = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(
-        &[payer, vesting_authority],
-        latest_blockhash,
-    );
-
+    let transaction = create_transaction(
+        &rpc_client,
+        &[instruction],
+        payer,
+        &[vesting_authority],
+        compute_unit_price,
+    ).unwrap();
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
@@ -426,6 +483,7 @@ fn command_split(
     vesting_token_pubkey: Pubkey,
     new_vesting_owner_pubkey: Pubkey,
     schedules: Vec<VestingSchedule>,
+    compute_unit_price: Option<u64>,
 ) {
     let (vesting_pubkey,_) = Pubkey::find_program_address(&[vesting_token_pubkey.as_ref()], &vesting_addin_program_id);
 
@@ -492,14 +550,13 @@ fn command_split(
         }.unwrap(),
     ];
 
-    let mut transaction = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
-
-    let latest_blockhash = rpc_client.get_latest_blockhash().unwrap();
-    transaction.sign(
-        &[payer, vesting_owner, &new_vesting_token_keypair],
-        latest_blockhash,
-    );
-
+    let transaction = create_transaction(
+        &rpc_client,
+        &instructions,
+        payer,
+        &[vesting_owner, &new_vesting_token_keypair],
+        compute_unit_price,
+    ).unwrap();
     rpc_client.send_transaction(&transaction).unwrap();
 }
 
@@ -873,16 +930,6 @@ impl ArgsHelper for App<'_, '_> {
     }
 }
 
-pub fn read_payer(payer_str: &str) -> Box<dyn Signer> {
-    let default_signer = DefaultSigner::new("payer", payer_str);
-    let mut wallet_manager = None;
-    let matches = ArgMatches::default();
-    default_signer.signer_from_path(
-        &matches,
-        &mut wallet_manager,
-    ).expect("Can't read payer")
-}
-
 fn main() {
     let matches = App::new(crate_name!())
         .about(crate_description!())
@@ -905,6 +952,14 @@ fn main() {
                 .takes_value(true)
                 .global(true)
                 .help("Specify the url of the rpc client (solana network)."),
+        )
+        .arg(
+            Arg::with_name("compute-unit-price")
+                .long("compute-unit-price")
+                .takes_value(true)
+                .validator(is_amount)
+                .global(true)
+                .help("Set compute unit price for transaction, integer in increments of 1/1000000 lamports per compute unit.")
         )
         .arg(
             Arg::with_name("governance_program_id")
@@ -1066,6 +1121,7 @@ fn main() {
 
     let governance_program_id = pubkey_of(&matches, "governance_program_id").unwrap();
     let vesting_addin_program_id = pubkey_of(&matches, "vesting_program_id").unwrap();
+    let compute_unit_price: Option<u64> = value_of(&matches, "compute-unit-price");
 
     match matches.subcommand() {
         ("deposit", Some(arg_matches)) => {
@@ -1099,6 +1155,7 @@ fn main() {
                     mint_pubkey,
                     realm_pubkey,
                     schedules,
+                    compute_unit_price,
                     confirm,
                 )
             } else {
@@ -1111,6 +1168,7 @@ fn main() {
                     vesting_owner_pubkey,
                     mint_pubkey,
                     schedules,
+                    compute_unit_price,
                     confirm,
                 )
             }
@@ -1146,6 +1204,7 @@ fn main() {
                     mint_pubkey,
                     realm_pubkey,
                     destination_token_pubkey,
+                    compute_unit_price,
                 )
             } else {
                 command_withdraw_svc(
@@ -1155,6 +1214,7 @@ fn main() {
                     &*vesting_owner_signer,
                     vesting_token_pubkey,
                     destination_token_pubkey,
+                    compute_unit_price,
                 )
             };
         }
@@ -1190,6 +1250,7 @@ fn main() {
                     mint_pubkey,
                     realm_pubkey,
                     new_vesting_owner_pubkey,
+                    compute_unit_price,
                 )
             } else {
                 command_change_owner(
@@ -1199,6 +1260,7 @@ fn main() {
                     &*vesting_owner_signer,
                     vesting_token_pubkey,
                     new_vesting_owner_pubkey,
+                    compute_unit_price,
                 )
             }
         }
@@ -1217,6 +1279,7 @@ fn main() {
                 record_owner_pubkey,
                 mint_pubkey,
                 realm_pubkey,
+                compute_unit_price,
             )
         }
         ("set-vote-percentage", Some(arg_matches)) => {
@@ -1246,6 +1309,7 @@ fn main() {
                 mint_pubkey,
                 realm_pubkey,
                 percentage,
+                compute_unit_price,
             )
         }
         ("split", Some(arg_matches)) => {
@@ -1272,6 +1336,7 @@ fn main() {
                 vesting_token_pubkey,
                 new_vesting_owner_pubkey,
                 schedules,
+                compute_unit_price,
             )
         }
         ("info", Some(arg_matches)) => {
