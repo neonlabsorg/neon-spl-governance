@@ -11,18 +11,14 @@ env:
 
 jobs:
   neon-governance-deploy:
-    runs-on: build-runner
+    runs-on: gha-runner-scale-set
     env:
       NEON_GOVERNANCE_IMAGE: neonlabsorg/neon-governance:${GITHUB_SHA}
     steps:
     - uses: actions/checkout@v2
-    - name: "Checkout submodules using a Personal Access Token"
-      run: |
-        git config --file .gitmodules --get-regexp url | while read url; do
-        git config --file=.gitmodules $(echo "$url" | sed -E "s/git@github.com:|https:\/\/github.com\//https:\/\/${{ secrets.CI_PAT }}:${{ secrets.CI_PAT }}@github.com\//")
-        done
-        git submodule sync
-        git submodule update --init --recursive
+      with:
+        token: ${{ secrets.GHTOKEN }}
+        submodules: 'true'
 
     - name: "Prepare to build image"
       id: prep
